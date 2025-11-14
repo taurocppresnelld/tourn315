@@ -3,7 +3,6 @@ import requests
 import json
 import random
 from utility import log_info, MyDataset
-from transformers.trainer_utils import get_last_checkpoint
 from transformers import AutoTokenizer, BitsAndBytesConfig
 import transformers
 import torch
@@ -26,7 +25,6 @@ from typing import Callable, Optional
 import bitsandbytes as bnb
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 import yaml
-from state_manager import get_state, set_state
 
 LOCAL_RANK = int(os.getenv("LOCAL_RANK", "0"))
 
@@ -40,6 +38,7 @@ class TrainingArguments(transformers.TrainingArguments):
     use_lora: Optional[bool] = field(default=False)
     disable_fa: Optional[bool] = field(default=False)
     use_attn_implementation: Optional[str] = field(default="")
+    
 
 @dataclass
 class LoraArguments:
@@ -339,30 +338,6 @@ def main():
     max_steps = train_request.get("max_steps", -1)
     log_info(f"max_steps: {max_steps}")
     
-    start_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    state = get_state()
-    state["train"]["start_train_time"] = start_time
-    if is_main_process(LOCAL_RANK):
-        set_state(state)
-        
-    total_steps_per_epoch = len(train_ds) // (
-                training_args.per_device_train_batch_size
-                * training_args.gradient_accumulation_steps
-                * training_args.world_size
-            )
-    
-    total_steps_all_epochs = total_steps_per_epoch * training_args.num_train_epochs
-    log_info(f"total_steps_per_epoch: {total_steps_per_epoch}; total_steps_all_epochs: {total_steps_all_epochs}")
-    
-    success_file = os.path.join(training_args.output_dir, "success.txt")
-    # remove the success file if it exists
-    if is_main_process(LOCAL_RANK) and os.path.exists(success_file):
-        os.remove(success_file)
-    
-    checking_step = train_request["checking_step"]
-    if checking_step > 0.6 * total_steps_per_epoch:
-        checking_step = int(0.6 * total_steps_per_epoch)
-    
     trainer = Trainer(
         model=model,
         tokenizer=tokenizer,
@@ -375,25 +350,13 @@ def main():
                 train_request["submission_dir"],
                 training_args.output_dir,
                 train_request["model_name"],
-                max_steps, 
-                checking_step=checking_step,
-                total_steps_all_epochs=total_steps_all_epochs,
-                end_time=train_request["end_time"],
-                checking_mode=train_request.get("checking_mode", "none")
+                max_steps
             )
         ],
     )
 
     trainer.tokenizer = tokenizer
-    # last_checkpoint = get_last_checkpoint(training_args.output_dir)
-    # log_info(f"last_checkpoint: {last_checkpoint}")
     trainer.train()
-    
-    if is_main_process(LOCAL_RANK):
-        success_file = os.path.join(training_args.output_dir, "success.txt")
-        with open(success_file, "w") as f:
-            f.write("Success")
-    log_info("Training successfully done", "finish")
 
 if __name__ == "__main__":
     main()

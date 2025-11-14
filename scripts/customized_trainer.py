@@ -13,8 +13,6 @@ import json
 from transformers.trainer_utils import is_main_process
 import wandb
 import torch
-from state_manager import get_state, set_state
-MAX_TRIES = 8
 
 
 MIS_MATCH_VOCAB_SIZE_MODELS = [
@@ -42,11 +40,7 @@ class CustomEvalSaveCallback(TrainerCallback):
         submission_dir: str,
         output_dir: str,
         original_model_name: str,
-        max_steps: int = -1,
-        checking_step: int = 100,
-        total_steps_all_epochs: int = -1,
-        end_time: str = "",
-        checking_mode: str = "none"
+        max_steps: int = -1
     ):
         self.function_when_to_evaluate = function_when_to_evaluate
         self.submission_dir = submission_dir
@@ -58,10 +52,6 @@ class CustomEvalSaveCallback(TrainerCallback):
         self.max_steps = max_steps
         self.has_checkpoint = False
         self.save_only = False
-        self.checking_step = checking_step
-        self.total_steps_all_epochs = total_steps_all_epochs
-        self.checking_mode = checking_mode
-        self.end_time = end_time
         
     def compute_loss(self, state: TrainerState, metrics):
         return metrics.get("eval_loss", None)
@@ -70,106 +60,6 @@ class CustomEvalSaveCallback(TrainerCallback):
         # Custom logic to decide whether to save or evaluate
         # print(f"************* on_step_end: {state.global_step}, check eval", flush=True)
         # TODO: implement the logic to save the model without evaluating if there is no check points --> avoid evaluating takes too much time
-        # Check if the checking_step is reached
-        # print(f"Checking the model at step: {state.global_step}, checking_step: {self.checking_step}, checking_mode: {self.checking_mode}", flush=True)
-        if state.global_step == self.checking_step and self.checking_mode == "first_time":
-            # print(f"Checking the model at step: {state.global_step}", flush=True)
-            # check the time so far to estimate the training time in total 
-            my_state = get_state()
-            start_time_obj = datetime.datetime.strptime(my_state["train"]["start_time"], "%Y-%m-%d %H:%M:%S")
-            start_train_time_obj = datetime.datetime.strptime(my_state["train"]["start_train_time"], "%Y-%m-%d %H:%M:%S")
-            
-            log_content = f"Checking the model at step: {state.global_step}"
-            now = datetime.datetime.now()
-            preparation_time = (start_train_time_obj - start_time_obj).total_seconds()
-            log_content += f"\nPreparation time: {preparation_time}"
-            time_so_far = (now - start_time_obj).total_seconds()
-            log_content += f"\nTime so far: {time_so_far}"
-            time_for_one_step = (now - start_train_time_obj).total_seconds() / self.checking_step
-            log_content += f"\nTime for one step: {time_for_one_step}"
-            # Now estimate the total training time for this training
-            log_content += f"\nTotal steps all epochs: {self.total_steps_all_epochs}"
-            total_remaining_training_time = time_for_one_step * (self.total_steps_all_epochs - state.global_step)
-            log_content += f"\nTotal remaining training time: {total_remaining_training_time}"
-            # n * time_so_far + total_remaining_training_time = total_remaining_time
-            end_time_obj = datetime.datetime.strptime(self.end_time, "%Y-%m-%d %H:%M:%S")
-            total_remaining_time = (end_time_obj - now).total_seconds()
-            log_content += f"\nTotal remaining time: {total_remaining_time}"
-            
-            # n * time_so_far + (time_so_far + total_remaining_training_time) = total_remaining_time
-            # time_so_far + total_remaining_training_time is the time it takes to finish the training (need to estimate the eval time and save time, assuming this is 15 minutes)
-            # assuming time_so_far is + 5 minutes, just in case the checking step takes more time than expected
-            max_var_time_sofar = 3 * 60
-            n = (total_remaining_time - (time_so_far + total_remaining_training_time + 12 * 60)) / (time_so_far + max_var_time_sofar) # 300 = 5 minutes, assume that it extra time would be more or less 5 minutes
-            n = int(n)
-            my_state["check_details"] = {
-                "now": str(now.strftime("%Y-%m-%d %H:%M:%S")),
-                "start_time": str(start_time_obj.strftime("%Y-%m-%d %H:%M:%S")),
-                "start_train_time": str(start_train_time_obj.strftime("%Y-%m-%d %H:%M:%S")),
-                "checking_step": self.checking_step,
-                "checking_mode": self.checking_mode,
-                "estimation_of_steps": n,
-                "preparation_time": preparation_time,
-                "time_so_far": time_so_far,
-                "time_for_one_step": time_for_one_step,
-                "total_remaining_training_time": total_remaining_training_time,
-                "total_remaining_time": total_remaining_time,
-                "end_time": self.end_time,
-            }
-            if n > 0: # we should try more 
-                log_content += f"\nEstimated number of steps to complete the training: {n}"
-                control.should_training_stop = True
-                control.should_save = False
-                args.save_strategy = "no"
-                # save the current loss of this step to the state;
-                last_log = state.log_history[-1]
-                my_state["train"]["current_loss"] = last_log["loss"]
-                my_state["mode"] = "continue"
-                if n > MAX_TRIES:
-                    n = MAX_TRIES
-                my_state["next_runs"] = n + 1 # including the current run
-            else:
-                print(f"Time is not enough so we will finish the training", flush=True)
-                my_state["mode"] = "finish"
-            
-            if is_main_process(LOCAL_RANK):
-                set_state(my_state)
-                print(log_content, flush=True)            
-            return control
-    
-        elif state.global_step == self.checking_step and self.checking_mode == "second_time": # at second time, we don't estimate the training time again, just save the current_loss
-            log_content = f"Checking the model at step: {state.global_step} where check_mode=second_time"            
-            my_state = get_state()
-            current_loss = state.log_history[-1]["loss"]
-            my_state["train"]["current_loss"] = current_loss
-                
-            control.should_training_stop = True
-
-            # Check if current_loss > current min_loss --> do not save to save time and space
-            # 
-            # if my_state["train"]["current_loss"] > current_min_loss:
-            #     print(f"Current loss: {my_state['train']['current_loss']} is greater than the current min_loss: {current_min_loss}, do not save the checkpoint", flush=True)
-            #     control.should_save = False
-            # check if this is the last run and the current_loss is the lowest --> keep running the training
-            current_is_the_best = False
-            current_min_loss = min([run["current_loss"] for run in my_state["runs"]])
-            if current_loss <= current_min_loss:
-                if len(my_state["runs"]) + 1 == my_state["next_runs"]:
-                    # print(f"Current loss: {my_state['train']['current_loss']} is greater than the current min_loss: {current_min_loss}, do not save the checkpoint", flush=True)
-                    current_is_the_best = True
-                    
-            if current_is_the_best:
-                control.should_training_stop = False
-                my_state["mode"] = "finish"
-            else:
-                control.should_save = False
-                args.save_strategy = "no"
-            
-            if is_main_process(LOCAL_RANK):
-                set_state(my_state)
-                # print(log_content, flush=True)
-        
-            
         when_to_eval = self.function_when_to_evaluate(state.global_step)
         if when_to_eval["eval"]:
             # do not allow the pod to be stopped by any reason 

@@ -8,18 +8,14 @@ import asyncio
 import json
 import os
 import shutil
-import copy
 import subprocess
 import sys
 import uuid
 import re
-import time 
 from datetime import datetime, timezone, timedelta
 
 import yaml
 from transformers import AutoTokenizer
-from state_manager import get_state, set_state
-import numpy as np
 
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -43,7 +39,7 @@ from dpo_config import get_training_json as get_dpo_training_json
 from grpo_config import get_training_json as get_grpo_training_json
 import pathlib
 from transformers import AutoConfig
-import lr_utils
+
 
 def run_cmd_with_log(cmd: str, log_file_path: str, env_vars: dict = None):
     # print(f"Running command: {cmd}", flush=True)
@@ -52,7 +48,7 @@ def run_cmd_with_log(cmd: str, log_file_path: str, env_vars: dict = None):
         process_env = os.environ.copy()
         if env_vars:
             process_env.update(env_vars)
-
+        
         # Run the command, capturing stdout and stderr
         process = subprocess.Popen(
             cmd,
@@ -106,8 +102,8 @@ def get_model_architecture(model_name: str) -> str:
         if "model type `gpt_oss`" in str(e):
             return "GptOssForCausalLM"
         return "Unknown"
-
-
+    
+    
 def is_openai_model(model_name: str) -> bool:
     architecture = get_model_architecture(model_name)
     if architecture.lower() == "gptossforcausallm":
@@ -130,82 +126,7 @@ def get_error_type(log_path: str):
         return None
 
 
-def extract_output_dir(train_cmd: str) -> str:
-    match = re.search(r"--output_dir\s+(.*?)\s+", train_cmd)
-    if match:
-        return match.group(1)
-    else:
-        return None
-
-
-def run_training(
-    train_cmd: str,
-    log_path: str,
-    task_id: str,
-    retries: int,
-    task_type: str,
-    expected_repo_name: str,
-):
-    for i in range(retries):
-        print(
-            f"************* Training attempt {i+1}/{retries} for task {task_id}*************",
-            flush=True,
-        )
-        if i > 0:  # there was something wrong so we will reduce the batch_size
-            # first check if the training is OOM
-            if os.path.exists(log_path):
-                error_type = get_error_type(log_path)
-                if error_type == OOM_ERROR:
-                    current_batch_size = extract_value_from_cmd(
-                        train_cmd, "per_device_train_batch_size"
-                    )
-                    current_batch_size = int(current_batch_size)
-                    if current_batch_size > 1:
-                        new_batch_size = current_batch_size // 2
-                        print(
-                            f"Reducing batch size from {current_batch_size} to {new_batch_size}",
-                            flush=True,
-                        )
-                        train_cmd = replace_args_in_cmd(
-                            train_cmd,
-                            "per_device_train_batch_size",
-                            str(new_batch_size),
-                        )
-                        # print(f"New train command: {train_cmd}", flush=True)
-                    else:
-                        print(f"batch size is 1, cannot reduce further", flush=True)
-                        if task_type == TaskType.GRPOTASK.value:
-                            # disable vllm
-                            train_cmd = replace_args_in_cmd(
-                                train_cmd, "use_vllm", "False"
-                            )
-                            # print(f"disable VLLM {train_cmd}", flush=True)
-                elif error_type == VLLM_OOM_ERROR:
-                    if task_type == TaskType.GRPOTASK.value:
-                        print(f"VLLM OOM error, disable VLLM", flush=True)
-                        train_cmd = replace_args_in_cmd(train_cmd, "use_vllm", "False")
-
-        # empty the log file if it exists
-        if os.path.exists(log_path):
-            with open(log_path, "w") as f:
-                f.write("STARTING TRAINING")
-
-        training_env_vars = {
-            "WANDB_MODE": "offline",
-            "WANDB_RUN_ID": f"{task_id}_{expected_repo_name}",
-            "WANDB_NAME": f"{task_id}_{expected_repo_name}",
-        }
-
-        run_cmd_with_log(train_cmd, log_path, env_vars=training_env_vars)
-        # check if training is successfully here so we can break the loop; if output_dir contains file: "successs.txt" return true
-        output_dir = extract_value_from_cmd(train_cmd, "output_dir")
-        if os.path.exists(os.path.join(output_dir, "success.txt")):
-            return True
-        time.sleep(5)
-    return False
-
-
-def patch_wandb_symlinks(base_dir: str):
+def patch_wandb_symlinks(base_dir:str):
     for root, _, files in os.walk(base_dir):
         for name in files:
             full_path = os.path.join(root, name)
@@ -229,25 +150,6 @@ def patch_wandb_symlinks(base_dir: str):
                 else:
                     print("Target not found, creating dummy")
                     pathlib.Path(full_path).touch()
-
-
-def delete_poor_checkpoints(train_runs: list[dict]):
-    lowest_loss = min([run["current_loss"] for run in train_runs])
-    for run in train_runs:
-        if run["current_loss"] > lowest_loss:
-            if os.path.exists(run["output_dir"]):
-                print(f"Deleting checkpoint {run['output_dir']} with loss {run['current_loss']}", flush=True)
-                shutil.rmtree(run["output_dir"])
-
-
-def get_log_scale(task_type: str):
-    log_scale_map = {
-        TaskType.INSTRUCTTEXTTASK.value: 0.18,
-        TaskType.DPOTASK.value: 0.18,
-        TaskType.GRPOTASK.value: 0.2,
-        TaskType.CHATTASK.value: 0.18,
-    }
-    return log_scale_map[task_type]
 
 
 def main():
@@ -290,15 +192,17 @@ def main():
     parser.add_argument(
         "--max-steps", type=int, help="Max steps to use for training", default=-1
     )
-    parser.add_argument("--retries", type=int, help="Number of retries", default=5)
+    parser.add_argument(
+        "--retries", type=int, help="Number of retries", default=5
+    )
     parser.add_argument(
         "--min-steps", type=int, help="Min steps to use for training", default=100
     )
-
+    
     parser.add_argument(
-        "--reg-ratio", type=float, help="Reg ratio to use for training", default=0.900427
+        "--reg-ratio", type=float, help="Reg ratio to use for training", default=1.0
     )
-
+    
     args = parser.parse_args()
     original_model_name = args.model
     original_task_type = args.task_type
@@ -314,7 +218,6 @@ def main():
     submission_dir = train_paths.get_checkpoints_output_path(
         args.task_id, args.expected_repo_name
     )
-    print(f"submission_dir: {submission_dir}", flush=True)
     if not os.path.exists(submission_dir):
         os.makedirs(submission_dir, exist_ok=True)
 
@@ -331,25 +234,19 @@ def main():
     os.makedirs(ds_folder, exist_ok=True)
     request_path = os.path.join(ds_folder, f"training_request_{args.task_id}.json")
     model_path = str(train_paths.get_text_base_model_path(original_model_name))
-
+    
     is_openai = False
     if is_openai_model(original_model_name):
         print("Upgrading python packages for openai model", flush=True)
         run_cmd_with_log(
-            "pip uninstall -y transformers && pip install transformers==4.55.0",
-            os.path.join(ds_folder, f"upgrade_transformers.log"),
+            "pip uninstall -y transformers && pip install transformers==4.55.0", os.path.join(ds_folder, f"upgrade_transformers.log")
         )
-        # upgrade deepspeed
-        run_cmd_with_log(
-            "pip uninstall -y deepspeed && pip install deepspeed==0.17.4",
-            os.path.join(ds_folder, f"upgrade_deepspeed.log"),
-        )
-        # install kernel
-        run_cmd_with_log(
-            "pip install kernels==0.9.0", os.path.join(ds_folder, f"install_kernel.log")
-        )
+        #upgrade deepspeed
+        run_cmd_with_log("pip uninstall -y deepspeed && pip install deepspeed==0.17.4", os.path.join(ds_folder, f"upgrade_deepspeed.log"))
+        # install kernel 
+        run_cmd_with_log("pip install kernels==0.9.0", os.path.join(ds_folder, f"install_kernel.log"))
         is_openai = True
-
+    
     train_info = {
         "model_name": original_model_name,
         "model_path": model_path,
@@ -370,13 +267,9 @@ def main():
         "is_openai": is_openai,
         "reg_ratio": args.reg_ratio,
         "find_lk_lr": True,
-        "checking_mode": "first_time",
     }
 
-    if (
-        args.task_type == TaskType.INSTRUCTTEXTTASK.value
-        or args.task_type == TaskType.CHATTASK.value
-    ):
+    if args.task_type == TaskType.INSTRUCTTEXTTASK.value or args.task_type == TaskType.CHATTASK.value:
         train_info = get_instruct_training_json(train_info)
         tokenize_cmd = (
             f"/workspace/axo_py/bin/python tokenize_instruct.py {request_path}"
@@ -395,7 +288,6 @@ def main():
     else:
         raise ValueError(f"Task type {args.task_type} not supported")
 
-    
     with open(request_path, "w") as f:
         json.dump(train_info, f, indent=4, ensure_ascii=False)
 
@@ -403,100 +295,69 @@ def main():
         tokenize_cmd, os.path.join(ds_folder, f"tokenize_{args.task_id}.log")
     )
 
-    original_train_cmd = train_cmd
     train_success = False
-    state = get_state()
-    state = {}
-    set_state(state) # reset first
-    state["mode"] = "initial"
-    # at first the state is always running the train_cmd
+    log_path = os.path.join(ds_folder, f"train_{args.task_id}.log")
+    for i in range(args.retries):
+        print(
+            f"************* Training attempt {i+1}/{args.retries} for task {args.task_id}*************",
+            flush=True,
+        )
+        if i > 0:  # there was something wrong so we will reduce the batch_size
+            # first check if the training is OOM
+            if os.path.exists(log_path):
+                error_type = get_error_type(log_path)
+                if error_type == OOM_ERROR:
+                    current_batch_size = extract_value_from_cmd(
+                        train_cmd, "per_device_train_batch_size"
+                    )
+                    current_batch_size = int(current_batch_size)
+                    if current_batch_size > 1:
+                        new_batch_size = current_batch_size // 2
+                        print(
+                            f"Reducing batch size from {current_batch_size} to {new_batch_size}",
+                            flush=True,
+                        )
+                        train_cmd = replace_args_in_cmd(
+                            train_cmd,
+                            "per_device_train_batch_size",
+                            str(new_batch_size),
+                        )
+                        # print(f"New train command: {train_cmd}", flush=True)
+                    else:
+                        print(f"batch size is 1, cannot reduce further", flush=True)
+                        if args.task_type == TaskType.GRPOTASK.value:
+                            # disable vllm
+                            train_cmd = replace_args_in_cmd(
+                                train_cmd, "use_vllm", "False"
+                            )
+                            # print(f"disable VLLM {train_cmd}", flush=True)
+                elif error_type == VLLM_OOM_ERROR:
+                    if args.task_type == TaskType.GRPOTASK.value:
+                        print(f"VLLM OOM error, disable VLLM", flush=True)
+                        train_cmd = replace_args_in_cmd(train_cmd, "use_vllm", "False")
 
-    set_state(state)
-    # TODO Run something magic here
-    count = 0
-    while True:
-        state = get_state()
-        train_cmd = original_train_cmd  # will replace based on the state later
-        c_train_info = copy.deepcopy(train_info)
-        final_output_dir = None
-        if args.task_type == TaskType.GRPOTASK.value:
-            state["mode"] = "finish" # do not run this for GRPO task
-            c_train_info["train_request"]["checking_mode"] = "none"
+        # empty the log file if it exists
+        if os.path.exists(log_path):
+            with open(log_path, "w") as f:
+                f.write("STARTING TRAINING")
+
+        task_id = args.task_id
+        expected_repo_name = args.expected_repo_name
+        
+        training_env_vars = {
+            "WANDB_MODE": "offline",
+            "WANDB_RUN_ID": f"{task_id}_{expected_repo_name}",
+            "WANDB_NAME": f"{task_id}_{expected_repo_name}",
+        }
+        
+        run_cmd_with_log(train_cmd, log_path, env_vars=training_env_vars)
+        # check if the training is successfully done; it is done, the output_dir should not be empty there is at least 2 files in the submission_dir
+        if not os.path.exists(submission_dir) or len(os.listdir(submission_dir)) < 2:
+            print(f"Training failed for task {args.task_id}", flush=True)
         else:
-            if state["mode"] == "initial":
-                c_train_info["train_request"]["checking_mode"] = "first_time"
-                
-            elif state["mode"] == "continue":
-                c_train_info["train_request"]["checking_mode"] = "second_time"
-                n_runs = state["next_runs"]
-                if "lrs" not in state: # first time of continue
-                    current_lr = float(state["train"]["lr"])
-                    state["lrs"] = lr_utils.extend_learning_rates(current_lr, n_runs, log_range=get_log_scale(args.task_type))
-                    assert len(state["lrs"]) == n_runs, f"Number of learning rates {state['lrs']} should be equal to number of runs {n_runs}"
-                    state["runs"] = []
-                
-                set_state(state)
-                state["runs"].append(state["train"].copy())
-                delete_poor_checkpoints(state["runs"])
-                if len(state["runs"]) < n_runs:
-                    index = len(state["runs"])
-                    current_lr = state["lrs"][index]
-                    train_cmd = replace_args_in_cmd(train_cmd, "learning_rate", str(state["lrs"][index]))
-                else: # the final run
-                    # first find from runs the best loss
-                    c_train_info["train_request"]["checking_mode"] = "none"
-                    index = np.argmin([run["current_loss"] for run in state["runs"]])
-                    print(f"BL;{index};{state['runs'][index]['current_loss']}; {state['lrs'][index]}", flush=True)
-                    train_cmd = state["runs"][index]["train_cmd"]  #replace_args_in_cmd(train_cmd, "learning_rate", str(state["lrs"][index]))
-                    final_output_dir = state["runs"][index]["output_dir"]
-                    state["mode"] = "finish"
-            else: # the state = finish; no need to run more
-                assert state["mode"] == "finish"
-                break
-        
-        set_state(state)
-        if train_cmd:
-            run_output_dir = output_dir + f"_{count}" if not final_output_dir else final_output_dir
-            train_cmd = replace_args_in_cmd(train_cmd, "output_dir", run_output_dir)
-            
-            current_request_path = os.path.join(ds_folder, f"training_request_{args.task_id}_{count}.json")
-            with open(current_request_path, "w") as f:
-                json.dump(c_train_info, f, indent=4, ensure_ascii=False)
-            
-            train_cmd = replace_args_in_cmd(train_cmd, "request_path", current_request_path)
-            
-            state["train"] = {
-                "train_cmd": train_cmd,
-                "log_path": os.path.join(ds_folder, f"train_{args.task_id}.log"),
-                "lr": extract_value_from_cmd(train_cmd, "learning_rate"),
-                "output_dir": run_output_dir
-            }
-            state["train"]["start_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            
-            set_state(state)
-            
-            log_path = state["train"]["log_path"]
-            # print(f"Run training with train_info: {c_train_info}", flush=True)
-            success = run_training(
-                train_cmd,
-                log_path,
-                args.task_id,
-                args.retries,
-                args.task_type,
-                args.expected_repo_name,
-            )
-            time.sleep(5)
-            if not success:
-                print(f"Training failed for task {args.task_id} at count={count}", flush=True)
-                break 
-        
-        count += 1
-
-    if not os.path.exists(submission_dir) or len(os.listdir(submission_dir)) < 2:
-        print(f"Training failed for task {args.task_id}", flush=True)
-    else:
-        print(f"Training successfully done for task {args.task_id}", flush=True)
-        train_success = True
+            print(f"Training successfully done for task {args.task_id}", flush=True)
+            train_success = True
+            break
 
     if not train_success:
         print(f"Training failed for task {args.task_id}", flush=True)
@@ -505,7 +366,7 @@ def main():
         run_cmd_with_log(
             add_noise_cmd, os.path.join(ds_folder, f"add_noise_{args.task_id}.log")
         )
-
+    
     patch_wandb_symlinks(train_cst.WANDB_LOGS_DIR)
 
 

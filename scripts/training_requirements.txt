@@ -24,7 +24,6 @@ requests
 toml
 tenacity
 minio
-redis==7.0.1
 PyYAML
 pandas==2.2.3
 mpi4py

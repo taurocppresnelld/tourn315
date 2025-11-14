@@ -1,11 +1,4 @@
-from model_utility import (
-    get_model_architecture,
-    get_model_num_params,
-    get_use_liger,
-    disable_flash_attention,
-    get_data_size,
-    get_gpu_count,
-)
+from model_utility import get_model_architecture, get_model_num_params, get_use_liger, disable_flash_attention, get_data_size, get_gpu_count
 from copy import deepcopy
 from lrs_lookup import get_instruct_lr
 
@@ -14,7 +7,7 @@ FIXED_BS_CONFIG = {
     "EleutherAI/gpt-neo-1.3B": {"batch_size": 36},
     "EleutherAI/gpt-neo-125m": {"batch_size": 48},
     "bigscience/bloom-560m": {"batch_size": 10},
-    "facebook/opt-1.3b": {"batch_size": 38},
+    "facebook/opt-1.3b" : {"batch_size": 38},
     "facebook/opt-350m": {"batch_size": 36},
     "facebook/opt-125m": {"batch_size": 48},
 }
@@ -25,7 +18,7 @@ INSTRUCT_CONFIG = {
         "distributed": "ddp",
         "gpu_count": 1,
         "batch_size": 140,
-        "use_lora": False,
+        "use_lora": False
     },
     "1_2_b": {
         "lr": 0.0001,
@@ -79,21 +72,21 @@ INSTRUCT_CONFIG = {
         "gpu_count": 8,
         "use_lora": True,
         "batch_size": 8,
-    },
+    }        
 }
 
 for key in INSTRUCT_CONFIG:
     INSTRUCT_CONFIG[key]["label"] = key
-
+    
 
 def get_instruct_config(param_nums: int) -> dict:
     result = {
-        "lr": 4e-5,
-        "distributed": "ds",
-        "gpu_count": 8,
-        "batch_size": 6,
-        "use_lora": True,
-    }
+            "lr": 4e-5,
+            "distributed": "ds",
+            "gpu_count": 8,
+            "batch_size": 6,
+            "use_lora": True
+        }
     if param_nums < 1_000_000_000:
         result = INSTRUCT_CONFIG["0_1_b"]
     elif param_nums < 2_000_000_000:
@@ -106,7 +99,7 @@ def get_instruct_config(param_nums: int) -> dict:
         result = INSTRUCT_CONFIG["5_9_b"]
     elif param_nums < 12_000_000_000:
         result = INSTRUCT_CONFIG["9_12_b"]
-    elif param_nums < 15_000_000_000:
+    elif param_nums < 15_000_000_000:  
         result = INSTRUCT_CONFIG["12_15_b"]
     elif param_nums < 35_000_000_000:
         result = INSTRUCT_CONFIG["15_40_b"]
@@ -178,13 +171,11 @@ def get_run_cmd(config: dict, gpu_nums: int):
 
     for key, value in config.items():
         template = template.replace("{" + key + "}", str(value))
-
+        
     if config.get("use_attn_implementation", ""):
         use_attn_implementation = config["use_attn_implementation"]
-        template = (
-            template + f""" --use_attn_implementation {use_attn_implementation}"""
-        )
-
+        template = template + f""" --use_attn_implementation {use_attn_implementation}"""
+        
     return template
 
 
@@ -195,7 +186,7 @@ def get_training_json(train_info: dict) -> dict:
     param_nums = get_model_num_params(model_name, model_path)
     config = get_instruct_config(param_nums)
     run_config = {
-        "epoch_num": 3,
+        "epoch_num": 5,
         "batch_size": config["batch_size"],
         "learning_rate": config["lr"],
         "min_lr_rate": 0.25,
@@ -210,27 +201,21 @@ def get_training_json(train_info: dict) -> dict:
         "distributed": config.get("distributed", "ddp"),
         "gradient_checkpointing": "True",
         "gradient_accumulation_steps": 4,
-        "use_attn_implementation": (
-            "kernels-community/vllm-flash-attn3"
-            if train_info.get("is_openai", False)
-            else ""
-        ),
+        "use_attn_implementation": "kernels-community/vllm-flash-attn3" if train_info.get("is_openai", False) else ""
     }
-
+    
     # there are models that do not support packing, so we need to check if the model supports packing
-    if run_config["disable_fa"] == "True" or model_architecture.strip().lower() in [
-        "optforcausallm"
-    ]:
+    if run_config["disable_fa"] == "True" or model_architecture.strip().lower() in ["optforcausallm"]:
         run_config["packing"] = "False"
-
+    
     # data_size = get_data_size(train_info["request_path"])
-
+    
     # if run_config["disable_fa"]: # if FA is not usable
     #     run_config["batch_size"] = run_config["batch_size"] * 2
 
     if model_name in FIXED_BS_CONFIG:
         run_config["batch_size"] = FIXED_BS_CONFIG[model_name]["batch_size"]
-
+    
     if model_architecture.strip().lower() in [
         "gptneoxforcausallm",
         "gptjforcausallm",
@@ -242,28 +227,30 @@ def get_training_json(train_info: dict) -> dict:
             run_config["batch_size"] = int(run_config["batch_size"] / 1.5)
         elif "pythia" in model_name.lower():
             run_config["batch_size"] = int(run_config["batch_size"] / 1.8)
-
-    if model_name in ["microsoft/phi-2", "microsoft/phi-1_5"]:
+    
+    if (
+        model_name in ["microsoft/phi-2", "microsoft/phi-1_5"]
+    ): 
         run_config["batch_size"] = int(run_config["batch_size"] / 4)
-
+    
     if "bloom-560m" in model_name or "bloomz-560m" in model_name:
         run_config["batch_size"] = 8
-
+    
     if model_name == "mistralai/Mistral-7B-v0.1":
         run_config["batch_size"] = int(3 * run_config["batch_size"] / 4)
-
+    
     if "falcon" in model_name.lower():
         run_config["batch_size"] = int(run_config["batch_size"] / 2)
-
+    
     data_per_step = run_config["batch_size"] * run_config["gpu_nums"]
     if data_per_step >= 64:
         run_config["gradient_accumulation_steps"] = 1
     else:
         run_config["gradient_accumulation_steps"] = int(64 / data_per_step)
-
+    
     if model_architecture.strip().lower() in ["gptossforcausallm"]:
-        run_config["use_lora"] = False  # currently, gptoss does not support lora
-
+        run_config["use_lora"] = False # currently, gptoss does not support lora
+    
     if train_info["find_lk_lr"]:
         # get lr from lrs_lookup.py
         lr = get_instruct_lr(model_name)
@@ -272,23 +259,21 @@ def get_training_json(train_info: dict) -> dict:
             run_config["learning_rate"] = lr
         else:
             print(f"Using lr from config: {run_config['learning_rate']}", flush=True)
-
+    
     run_config["learning_rate"] *= train_info["reg_ratio"]
     run_cmd = get_run_cmd(run_config, run_config["gpu_nums"])
     train_request = deepcopy(train_info)
     train_request["save_before_remaining_time"] = 3
     train_request["adjust_batch_size"] = False
     train_request["periodic_save_steps"] = 500
-    train_request["checking_step"] = 70
-
+    
     if param_nums < 1_000_000_000:
-        train_request["min_steps"] = max(
-            int(train_info["hours_to_complete"] * 100), train_request["min_steps"]
-        )
-
+        train_request["min_steps"] = max(int(train_info["hours_to_complete"] * 100), train_request["min_steps"])
+    
     elif param_nums < 9_000_000_000:
-        train_request["min_steps"] = max(
-            int(train_info["hours_to_complete"] * 70), train_request["min_steps"]
-        )
-
-    return {"train_request": train_request, "run_cmd": run_cmd}
+        train_request["min_steps"] = max(int(train_info["hours_to_complete"] * 70), train_request["min_steps"])
+    
+    return {
+        "train_request": train_request,
+        "run_cmd": run_cmd
+    }
