@@ -8,7 +8,7 @@ from model_utility import (
     get_gpu_count,
 )
 from copy import deepcopy
-from lrs_lookup import get_grpo_lr, get_grpo_python_lr
+from lrs_lookup import get_grpo_lr, get_grpo_lr_ratio, get_grpo_python_lr
 allow_find_lk_lr = False
 
 GRPO_CONFIG = {
@@ -332,6 +332,12 @@ def get_training_json(train_info: dict) -> dict:
     if not config.get("use_vllm", True):
         run_config["use_vllm"] = False
 
+    # has_python_execution = contain_python_execution(train_info["dataset_type"])
+    # if not has_python_execution:
+    #     allow_find_lk_lr = True
+    # else:
+    #     allow_find_lk_lr = False
+
     if train_info["find_lk_lr"] and allow_find_lk_lr:
         # get lr from lrs_lookup.py
         has_python_execution = contain_python_execution(train_info["dataset_type"])
@@ -346,6 +352,11 @@ def get_training_json(train_info: dict) -> dict:
             run_config["learning_rate"] = lr
         else:
             print(f"Using lr from config: {run_config['learning_rate']}", flush=True)
+    else:
+        reg_ratio = get_grpo_lr_ratio(model_name)
+        run_config["learning_rate"] *= reg_ratio
+
+        print(f"Using lr from config: {run_config['learning_rate']}", flush=True)
 
     run_config["learning_rate"] *= train_info["reg_ratio"]
 

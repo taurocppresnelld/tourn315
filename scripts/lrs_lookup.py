@@ -131,6 +131,66 @@ def get_grpo_lr(model: str):
     return None
 
 
+def get_grpo_lr_ratio(model: str):
+    scale_factor = 1.0
+    hashed_model = hash_model(model)
+    print(f"model_name: {model}", flush=True)
+
+    config_file = f"{os.path.join(current_dir, 'lrs')}/archives/grpo_{model.split('/', 1)[1]}.json"
+    print(f"config_grpo1: {config_file}")
+    if os.path.exists(config_file):
+        print(f"Config: {config_file}")
+        with open(config_file, "r") as f:
+            grpo_lrs = json.load(f)
+    else:
+        config_file = f"{os.path.join(current_dir, 'lrs')}/archives/grpo_{model.split('/', 1)[0]}.json"
+        print(f"config_grpo0: {config_file}")
+        if os.path.exists(config_file):
+            print(f"Config: {config_file}")
+            with open(config_file, "r") as f:
+                grpo_lrs = json.load(f)
+        else:
+            config_file = f"{os.path.join(current_dir, 'lrs')}/grpo.json"
+            print(f"config_grpo_default: {config_file}")
+            if os.path.exists(config_file):
+                print(f"Config: {config_file}")
+                with open(config_file, "r") as f:
+                    grpo_lrs = json.load(f)
+
+    ratio_file = f"{os.path.join(current_dir, 'lrs')}/archives/ratio_grpo_{model.split('/', 1)[1]}.json"
+    print(f"ratio_grpo1: {ratio_file}")
+    if os.path.exists(ratio_file):
+        print(f"Ratio: {ratio_file}")
+        with open(ratio_file, "r") as f:
+            ratio_lrs = json.load(f)
+            scale_factor = ratio_lrs["ratio"]
+    else:
+        ratio_file = f"{os.path.join(current_dir, 'lrs')}/archives/ratio_grpo_{model.split('/', 1)[0]}.json"
+        print(f"ratio_grpo0: {ratio_file}")
+        if os.path.exists(ratio_file):
+            print(f"Ratio: {ratio_file}")
+            with open(ratio_file, "r") as f:
+                ratio_lrs = json.load(f)
+                scale_factor = ratio_lrs["ratio"]
+        else:
+            ratio_file = f"{os.path.join(current_dir, 'lrs')}/ratio_grpo.json"
+            print(f"ratio_grpo_default: {ratio_file}")
+            if os.path.exists(ratio_file):
+                print(f"Ratio: {ratio_file}")
+                with open(ratio_file, "r") as f:
+                    ratio_lrs = json.load(f)
+                    scale_factor = ratio_lrs["ratio"]
+
+    for lr in grpo_lrs:
+        if lr["h"] == hashed_model:
+            lr_return = lr["lr"] * scale_factor
+            print(f"scale: {scale_factor}")
+            print(f"lr: {lr_return}")
+            return scale_factor
+
+    return 1.0
+
+
 def get_instruct_lr(model: str):
     scale_factor = 1.0
     hashed_model = hash_model(model)
